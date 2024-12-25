@@ -128,8 +128,9 @@ public class IRCServer {
                     if (parts.length > 1) {
                         String oldUsername = user.getUsername();
                         user.setUsername(parts[1]);
+                        Optional<User> updatedUser = userDatabase.updateUser(oldUsername, parts[1]);
                         mainRoom.sendMessage(String.format("Користувач %s змінив нікнейм на %s",
-                                oldUsername, parts[1]));
+                                oldUsername, updatedUser.map(User::getUsername).orElse("")));
                     }
                     break;
 
@@ -146,8 +147,14 @@ public class IRCServer {
                     out.println("/nick <new_name> - змінити нікнейм");
                     out.println("/quit - вийти з чату");
                     out.println("/help - показати це повідомлення");
+                    out.println("/metadata - показати метадані з'єднання");
                     break;
-
+                case "/metadata":
+                    out.println("Remote IP Address: " + socket.getInetAddress().getHostAddress());
+                    out.println("Remote Port: " + socket.getPort());
+                    out.println("Local IP Address: " + socket.getLocalAddress().getHostAddress());
+                    out.println("Local Port: " + socket.getLocalPort());
+                    break;
                 default:
                     out.println("Невідома команда. Використайте /help для списку команд");
             }

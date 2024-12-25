@@ -41,7 +41,7 @@ public class UserDatabaseSingleton {
         return userService.authenticateUser(username, password);
     }
 
-    public Optional<User> findUser(String username) {
-        return userService.findByUsername(username);
+    public Optional<User> updateUser(String oldUsername, String newUsername) {
+        return userService.updateUser(oldUsername, newUsername);
     }
 }

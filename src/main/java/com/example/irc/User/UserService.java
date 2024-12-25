@@ -32,7 +32,12 @@ public class UserService {
                 .filter(user -> passwordEncoder.matches(password, user.getPassword()));
     }
 
-    public Optional<User> findByUsername(String username) {
-        return userRepository.findByUsername(username);
+    public Optional<User> updateUser(String oldUsername, String newUsername) {
+        userRepository.findByUsername(oldUsername)
+                .map(u -> {
+                    u.setUsername(newUsername);
+                    return userRepository.save(u);
+                });
+        return userRepository.findByUsername(newUsername);
     }
 }

@@ -16,13 +16,11 @@ public class IRCClient {
         int SERVER_PORT = 6667;
 
         try {
-            // Підключення до сервера
             Socket socket = new Socket(SERVER_ADDRESS, SERVER_PORT);
             ConnectionFactory factory = new ClientConnectionFactory();
             Connection connection = factory.createConnection(socket);
             MessageHandler messageHandler = factory.createMessageHandler();
 
-            // Читання повідомлень від сервера в окремому потоці
             new Thread(() -> {
                 try {
                     String message;
@@ -34,11 +32,9 @@ public class IRCClient {
                 }
             }).start();
 
-            // Консольний ввід для надсилання повідомлень
             BufferedReader consoleReader = new BufferedReader(new InputStreamReader(System.in));
             String userInput;
 
-            // Спочатку реєстрація/логін
             System.out.println("Для реєстрації введіть: /register username password email");
             System.out.println("Для входу введіть: /login username password");
 
@@ -60,3 +56,5 @@ public class IRCClient {
         }
     }
 }
+
+
