@@ -1,27 +1,33 @@
 package com.example.irc.Chat;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-public class ChatRoom extends ChatComponent {
-    private List<ChatComponent> components = new ArrayList<>();
+public class ChatRoom {
+    private final String name;
+    private final Set<ChatUser> users = ConcurrentHashMap.newKeySet();
 
     public ChatRoom(String name) {
-        super(name);
+        this.name = name;
     }
 
-    @Override
+    public int getUserCount() {
+        return users.size();
+    }
+
+    public Set<ChatUser> getUsers() {
+        return users;
+    }
+
+    public void addComponent(ChatUser user) {
+        users.add(user);
+    }
+
+    public void removeComponent(ChatUser user) {
+        users.remove(user);
+    }
+
     public void sendMessage(String message) {
-        components.forEach(component -> component.sendMessage(message));
-    }
-
-    @Override
-    public void addComponent(ChatComponent component) {
-        components.add(component);
-    }
-
-    @Override
-    public void removeComponent(ChatComponent component) {
-        components.remove(component);
+        users.forEach(user -> user.sendMessage(message));
     }
 }

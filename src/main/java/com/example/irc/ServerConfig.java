@@ -1,6 +1,5 @@
 package com.example.irc;
 
-
 import lombok.Builder;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
