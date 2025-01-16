@@ -22,17 +22,32 @@ public class IRCServer {
     private final Map<String, ChatRoom> chatRooms = new ConcurrentHashMap<>();
     private final Map<String, String> channelTopics = new ConcurrentHashMap<>();
     private final Map<String, LocalDateTime> channelCreationTimes = new ConcurrentHashMap<>();
-    private final Map<String, Set<String>> channelUsers = new ConcurrentHashMap<>();
+    private final Map<String, Set<UserChannelInfo>> channelUsers = new ConcurrentHashMap<>();
     private final UserDatabaseSingleton userDatabase;
     private final ServerConfig serverConfig;
     private volatile boolean running;
     private ServerSocket serverSocket;
     private final String SERVER_NAME = "MyIRCServer";
     private final String SERVER_VERSION = "1.0.1";
-    private static final int SOCKET_TIMEOUT = 60000;
+    private static final int SOCKET_TIMEOUT = 600000;
     private static final int PING_INTERVAL = 30000;
     private static final int PONG_TIMEOUT = 10000;
-    private final LocalDateTime serverStartTime = LocalDateTime.now();
+
+    private record UserChannelInfo(String username, String email, User user) {
+
+        @Override
+            public boolean equals(Object o) {
+                if (this == o) return true;
+                if (o == null || getClass() != o.getClass()) return false;
+                UserChannelInfo that = (UserChannelInfo) o;
+                return username.equals(that.username);
+            }
+
+            @Override
+            public int hashCode() {
+                return Objects.hash(username);
+            }
+        }
 
     @Autowired
     public IRCServer(UserService userService, ServerConfig serverConfig) {
@@ -46,8 +61,8 @@ public class IRCServer {
         chatRooms.putIfAbsent(name, new ChatRoom(name));
         channelTopics.putIfAbsent(name, topic);
         channelCreationTimes.putIfAbsent(name, LocalDateTime.now());
+        channelUsers.putIfAbsent(name, ConcurrentHashMap.newKeySet());
     }
-
 
     @PostConstruct
     public void startServer() {
@@ -81,7 +96,6 @@ public class IRCServer {
         private final BufferedReader in;
         private final PrintWriter out;
         private User user;
-        private String nickname = "";
         private String username = "";
         private final Set<String> channels = new HashSet<>();
         private boolean registered = false;
@@ -89,11 +103,7 @@ public class IRCServer {
         private long lastMessageReceived = 0;
         private boolean waitingForPong = false;
         private LocalDateTime connectionTime;
-        private String realName = "";
         private String awayMessage = null;
-        private String email = "";
-        private String password = "";
-
 
         public ClientHandler(Socket socket) throws IOException {
             this.socket = socket;
@@ -104,14 +114,13 @@ public class IRCServer {
             this.connectionTime = LocalDateTime.now();
         }
 
-
         private void sendNumericReply(int code, String message) {
             out.println(":" + SERVER_NAME + " " + String.format("%03d", code) + " " +
-                    (nickname.isEmpty() ? "*" : nickname) + " " + message);
+                    (username.isEmpty() ? "*" : username) + " " + message);
         }
 
         private void sendServerMessage(String message) {
-            out.println(":" + SERVER_NAME + " NOTICE " + nickname + " :" + message);
+            out.println(":" + SERVER_NAME + " NOTICE " + username + " :" + message);
         }
 
         @Override
@@ -128,7 +137,7 @@ public class IRCServer {
                     handleIRCMessage(line);
                 }
             } catch (SocketTimeoutException e) {
-                System.out.println("Client timeout (no response): " + nickname);
+                System.out.println("Client timeout (no response): " + username);
             } catch (IOException e) {
                 if (running) {
                     System.out.println("Client connection error: " + e.getMessage());
@@ -154,13 +163,9 @@ public class IRCServer {
                 while (!socket.isClosed()) {
                     try {
                         Thread.sleep(PING_INTERVAL);
-
                         long now = System.currentTimeMillis();
-                        if (now - lastMessageReceived > PING_INTERVAL) {
-                            // No message received for PING_INTERVAL, send PING
-                            if (!waitingForPong) {
-                                sendPing();
-                            }
+                        if (now - lastMessageReceived > PING_INTERVAL && !waitingForPong) {
+                            sendPing();
                         }
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -171,8 +176,7 @@ public class IRCServer {
         }
 
         private void sendPing() {
-            String pingMessage = "PING :" + SERVER_NAME;
-            out.println(pingMessage);
+            out.println("PING :" + SERVER_NAME);
             out.flush();
             lastPingSent = System.currentTimeMillis();
             waitingForPong = true;
@@ -185,16 +189,12 @@ public class IRCServer {
 
             String command = parts[0].toUpperCase();
             switch (command) {
-                case "PRIVMSG":
+                case "REGISTER":
                     if (parts.length < 3) {
-                        sendNumericReply(461, "PRIVMSG :Not enough parameters. Usage: PRIVMSG <username> <password>");
+                        sendNumericReply(461, "REGISTER :Not enough parameters. Usage: REGISTER <username> <password> <email>");
                         return;
                     }
-                    String privUsername = parts[1];
-                    String privPassword = parts[2];
-                    String privEmail = privUsername + "@example.com";
-                    isAuthenticated = true;
-                    handleRegistration(privUsername, privPassword, privEmail);
+                    handleRegistration(parts[1], parts[2], parts[1] + "@example.com");
                     break;
 
                 case "AUTH":
@@ -202,33 +202,14 @@ public class IRCServer {
                         sendNumericReply(461, "AUTH :Not enough parameters. Usage: AUTH <username> <password>");
                         return;
                     }
-                    String authUsername = parts[1];
-                    String authPassword = parts[2];
-                    handleAuthentication(authUsername, authPassword);
+                    handleAuthentication(parts[1], parts[2]);
                     break;
 
-                case "NICK":
+                case "JOIN":
                     if (!isAuthenticated) {
                         sendNumericReply(484, ":Must authenticate first");
                         return;
                     }
-                    if (parts.length < 2) {
-                        sendNumericReply(431, ":No nickname given");
-                        return;
-                    }
-                    String newNick = parts[1];
-                    handleNickChange(newNick);
-                    break;
-
-                case "PONG":
-                    waitingForPong = false;
-                    return;
-
-                case "LIST":
-                    sendEnhancedChannelList();
-                    break;
-
-                case "JOIN":
                     if (parts.length < 2) return;
                     String channelName = parts[1].startsWith("#") ? parts[1] : "#" + parts[1];
                     joinChannel(channelName);
@@ -244,55 +225,8 @@ public class IRCServer {
                     partChannel(partChannel);
                     break;
 
-                case "PING":
-                    out.println("PONG :" + (parts.length > 1 ? parts[1] : SERVER_NAME));
-                    break;
-
-                case "QUIT":
-                    String quitMessage = parts.length > 1 ? message.substring(message.indexOf(" :") + 2) : "Client Quit";
-                    cleanup();
-                    break;
-
-                case "TOPIC":
-                    if (!registered) return;
-                    if (parts.length < 2) {
-                        sendNumericReply(461, "TOPIC :Not enough parameters");
-                        return;
-                    }
-                    String thisChannelName = parts[1];
-                    if (!thisChannelName.startsWith("#")) {
-                        thisChannelName = "#" + thisChannelName;
-                    }
-                    if (parts.length > 2) {
-                        String newTopic = parts[2].startsWith(":") ? parts[2].substring(1) : parts[2];
-                        setChannelTopic(thisChannelName, newTopic);
-                    } else {
-                        sendChannelTopic(thisChannelName);
-                    }
-                    break;
-
-                case "VERSION":
-                    sendNumericReply(351, SERVER_NAME + " " + SERVER_VERSION + " :Running since " +
-                            serverStartTime.format(DateTimeFormatter.ISO_LOCAL_DATE_TIME));
-                    break;
-
-                case "AWAY":
-                    if (parts.length > 1) {
-                        awayMessage = parts[1].startsWith(":") ? parts[1].substring(1) : parts[1];
-                        sendNumericReply(306, ":You have been marked as away");
-                    } else {
-                        awayMessage = null;
-                        sendNumericReply(305, ":You are no longer marked as away");
-                    }
-                    break;
-
-                case "WHOIS":
-                    if (parts.length < 2) {
-                        sendNumericReply(461, "WHOIS :Not enough parameters");
-                        return;
-                    }
-                    String targetNick = parts[1];
-                    handleWhoisCommand(targetNick);
+                case "LIST":
+                    sendEnhancedChannelList();
                     break;
 
                 case "NAMES":
@@ -307,63 +241,39 @@ public class IRCServer {
                     }
                     break;
 
-                case "MODE":
-                    if (parts.length < 2) {
-                        sendNumericReply(461, "MODE :Not enough parameters");
+                case "PRIVMSG":
+                    if (!isAuthenticated) {
+                        handleRegistration(parts[1], parts[2], parts[1] + "@example.com");
+                        handleAuthentication(parts[1], parts[2]);
                         return;
                     }
-                    handleModeCommand(parts);
+                    if (parts.length < 3) return;
+                    handlePrivMsg(parts[1], parts[2].startsWith(":") ? parts[2].substring(1) : parts[2]);
                     break;
+
+                case "QUIT":
+                    cleanup();
+                    break;
+
+                case "PONG":
+                    waitingForPong = false;
+                    break;
+
                 default:
                     if (!isAuthenticated && !command.equals("QUIT")) {
                         sendNumericReply(484, ":Must authenticate first");
-                        return;
                     }
             }
-        }
-
-        private void handleNickServCommand(String message) {
-            if (message.startsWith(":REGISTER")) {
-                String[] params = message.substring(9).split(" ");
-                if (params.length >= 2) {
-                    handleRegistration(nickname, params[0], params[1]);
-                }
-            } else if (message.startsWith(":IDENTIFY")) {
-                String[] params = message.substring(9).split(" ");
-                if (params.length >= 2) {
-                    handleAuthentication(params[0], params[1]);
-                }
-            }
-        }
-
-        private void sendEnhancedChannelList() {
-            sendNumericReply(321, "Channel :Users Name");
-
-            for (Map.Entry<String, ChatRoom> entry : chatRooms.entrySet()) {
-                String channel = entry.getKey();
-                ChatRoom room = entry.getValue();
-                String topic = channelTopics.getOrDefault(channel, "No topic set");
-                int userCount = room.getUserCount();
-
-                // Format: channel userCount :topic
-                sendNumericReply(322, channel + " " + userCount + " :" + topic);
-
-                // Add small delay to prevent flooding
-                try {
-                    Thread.sleep(100);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                }
-            }
-
-            sendNumericReply(323, ":End of /LIST");
         }
 
         private void handleRegistration(String username, String password, String email) {
             Optional<User> result = userDatabase.registerUser(username, password, email);
             if (result.isPresent()) {
                 registered = true;
-                sendServerMessage("Registration successful. You can now identify using IDENTIFY command.");
+                this.user = result.get();
+                this.username = username;
+                isAuthenticated = true;
+                sendServerMessage("NickServ " + username + "Account " + username + " has been successfully registered");
             } else {
                 sendServerMessage("Registration failed. Username may be taken.");
             }
@@ -374,112 +284,46 @@ public class IRCServer {
             if (result.isPresent()) {
                 isAuthenticated = true;
                 this.user = result.get();
-                sendServerMessage("You are now identified.");
+                this.username = username;
+                this.user.setOnline(true);
+                sendServerMessage("Authentication successful.");
+                sendNumericReply(001, ":Welcome to IRC Network, " + username);
+                sendServerMessage("NickServ" + " " + username + " " + "You are now identified with NickServ");
             } else {
                 sendServerMessage("Authentication failed.");
             }
         }
 
-        private void handleNickChange(String newNick) {
-            if (clients.stream().anyMatch(c -> c != this && c.nickname.equalsIgnoreCase(newNick))) {
-                sendNumericReply(433, newNick + " :Nickname is already in use");
-                return;
-            }
-
-            Optional<User> updateResult = userDatabase.updateUser(this.nickname, newNick);
-            if (updateResult.isPresent()) {
-                String oldNick = this.nickname;
-                this.nickname = newNick;
-                broadcastToAll(":" + oldNick + " NICK :" + newNick);
-            } else {
-                sendNumericReply(432, newNick + " :Nickname change failed");
-            }
-        }
-
-        private void broadcastToAll(String message) {
-            clients.forEach(client -> client.out.println(message));
-        }
-
-
-        private void handleWhoisCommand(String targetNick) {
-            Optional<ClientHandler> targetClient = clients.stream()
-                    .filter(c -> c.nickname.equalsIgnoreCase(targetNick))
-                    .findFirst();
-
-            if (targetClient.isPresent()) {
-                ClientHandler target = targetClient.get();
-                String userHost = target.socket.getInetAddress().getHostName();
-
-                // Send WHOIS information
-                sendNumericReply(311, target.nickname + " " + target.username + " " +
-                        userHost + " * :" + (target.realName.isEmpty() ? "No real name" : target.realName));
-
-                // Send channels
-                if (!target.channels.isEmpty()) {
-                    sendNumericReply(319, target.nickname + " :" + String.join(" ", target.channels));
-                }
-
-                // Send server info
-                sendNumericReply(312, target.nickname + " " + SERVER_NAME + " :Connected to IRC Server");
-
-                // Send away message if set
-                if (target.awayMessage != null) {
-                    sendNumericReply(301, target.nickname + " :" + target.awayMessage);
-                }
-
-                // Send connection time
-                sendNumericReply(317, target.nickname + " " +
-                        (System.currentTimeMillis() - target.connectionTime.atZone(java.time.ZoneOffset.UTC).toInstant().toEpochMilli()) / 1000 +
-                        " " + target.connectionTime.atZone(java.time.ZoneOffset.UTC).toEpochSecond() +
-                        " :seconds idle, signon time");
-
-                sendNumericReply(318, target.nickname + " :End of /WHOIS list");
-            } else {
-                sendNumericReply(401, targetNick + " :No such nick/channel");
-            }
-        }
-
-        private void handleModeCommand(String[] parts) {
-            String target = parts[1];
+        private void handlePrivMsg(String target, String message) {
             if (target.startsWith("#")) {
-                // Channel mode
-                ChatRoom room = chatRooms.get(target);
-                if (room != null) {
-                    if (parts.length == 2) {
-                        // Query channel modes
-                        sendNumericReply(324, target + " +nt"); // Example channel modes
-                    }
-                } else {
-                    sendNumericReply(403, target + " :No such channel");
+                if (chatRooms.containsKey(target)) {
+                    broadcastToChannel(target, ":" + username + " PRIVMSG " + target + " :" + message);
                 }
             } else {
-                // User mode
-                if (target.equals(nickname)) {
-                    if (parts.length == 2) {
-                        sendNumericReply(221, "+i"); // Example user modes
-                    }
-                } else {
-                    sendNumericReply(502, ":Can't change mode for other users");
-                }
+                clients.stream()
+                        .filter(c -> c.username.equals(target))
+                        .findFirst()
+                        .ifPresent(c -> c.out.println(":" + username + " PRIVMSG " + target + " :" + message));
             }
         }
 
-        private void setChannelTopic(String channelName, String topic) {
-            if (chatRooms.containsKey(channelName)) {
-                channelTopics.put(channelName, topic);
-                broadcastToChannel(channelName, ":" + nickname + " TOPIC " + channelName + " :" + topic);
-            } else {
-                sendNumericReply(403, channelName + " :No such channel");
-            }
-        }
+        private void sendEnhancedChannelList() {
+            sendNumericReply(321, "Channel :Users Members");
 
-        private void sendChannelTopic(String channelName) {
-            if (chatRooms.containsKey(channelName)) {
-                String topic = channelTopics.getOrDefault(channelName, "No topic is set");
-                sendNumericReply(332, channelName + " :" + topic);
-            } else {
-                sendNumericReply(403, channelName + " :No such channel");
+            for (Map.Entry<String, ChatRoom> entry : chatRooms.entrySet()) {
+                String channel = entry.getKey();
+                Set<UserChannelInfo> users = channelUsers.get(channel);
+                String topic = channelTopics.getOrDefault(channel, "No topic set");
+
+                String usersList = users.stream()
+                        .map(info -> info.username + "(" + info.email + ")")
+                        .reduce((a, b) -> a + ", " + b)
+                        .orElse("No users");
+
+                sendNumericReply(322, channel + " " + users.size() + " :" + topic + " [" + usersList + "]");
             }
+
+            sendNumericReply(323, ":End of /LIST");
         }
 
         private void joinChannel(String channelName) {
@@ -490,107 +334,70 @@ public class IRCServer {
             ChatRoom room = chatRooms.get(channelName);
             channels.add(channelName);
 
-            // Update channel users list
-            channelUsers.computeIfAbsent(channelName, k -> ConcurrentHashMap.newKeySet())
-                    .add(nickname);
+            UserChannelInfo userInfo = new UserChannelInfo(
+                    username,
+                    user.getEmail(),
+                    user
+            );
+            channelUsers.get(channelName).add(userInfo);
 
-            room.addComponent(new ChatUser(nickname, out));
+            room.addComponent(new ChatUser(username, out));
 
-            // Send join confirmation
-            String joinMessage = ":" + nickname + "!" + username + "@" + socket.getInetAddress().getHostName() +
+            String joinMessage = ":" + username + "!" + username + "@" + socket.getInetAddress().getHostName() +
                     " JOIN " + channelName;
             broadcastToChannel(channelName, joinMessage);
 
-            // Send topic
-            sendChannelTopic(channelName);
+            String topic = channelTopics.getOrDefault(channelName, "No topic set");
+            sendNumericReply(332, channelName + " :" + topic);
 
-            // Send names list
             sendChannelNames(channelName);
-
-            // Send channel creation time
-            LocalDateTime creationTime = channelCreationTimes.get(channelName);
-            if (creationTime != null) {
-                sendNumericReply(329, channelName + " " + creationTime.atZone(java.time.ZoneOffset.UTC).toEpochSecond());
-            }
         }
-
-        private void checkRegistration() {
-            if (!registered && !nickname.isEmpty() && !username.isEmpty()) {
-                registered = true;
-                sendNumericReply(001, ":Welcome to the IRC Network " + nickname + "!" + username + "@" + socket.getInetAddress().getHostName());
-                sendNumericReply(002, ":Your host is " + SERVER_NAME + ", running version " + SERVER_VERSION);
-                sendNumericReply(003, ":This server was created " + new Date());
-                sendNumericReply(004, SERVER_NAME + " " + SERVER_VERSION + " o o");
-            }
-        }
-
 
         private void partChannel(String channelName) {
             if (chatRooms.containsKey(channelName)) {
                 ChatRoom room = chatRooms.get(channelName);
-                room.removeComponent(new ChatUser(nickname, out));
+                room.removeComponent(new ChatUser(username, out));
                 channels.remove(channelName);
 
-                Set<String> users = channelUsers.get(channelName);
+                Set<UserChannelInfo> users = channelUsers.get(channelName);
                 if (users != null) {
-                    users.remove(nickname);
+                    users.removeIf(info -> info.username.equals(username));
                 }
 
-                broadcastToChannel(channelName, ":" + nickname + " PART " + channelName);
+                broadcastToChannel(channelName, ":" + username + " PART " + channelName);
             }
-        }
-
-
-        private void handlePrivMsg(String target, String message) {
-            if (target.startsWith("#")) {
-                // Channel message
-                if (chatRooms.containsKey(target)) {
-                    broadcastToChannel(target, ":" + nickname + " PRIVMSG " + target + " :" + message);
-                }
-            } else {
-                // Private message
-                clients.stream()
-                        .filter(c -> c.nickname.equals(target))
-                        .findFirst()
-                        .ifPresent(c -> c.out.println(":" + nickname + " PRIVMSG " + target + " :" + message));
-            }
-        }
-
-        private void broadcastToChannel(String channelName, String message) {
-            ChatRoom room = chatRooms.get(channelName);
-            if (room != null) {
-                room.sendMessage(message);
-            }
-        }
-
-        private void sendChannelList() {
-            sendNumericReply(321, "Channel :Users  Name");
-            for (Map.Entry<String, ChatRoom> entry : chatRooms.entrySet()) {
-                sendNumericReply(322, entry.getKey() + " " +
-                        ((ChatRoom)entry.getValue()).getUserCount() + " :Channel topic");
-            }
-            sendNumericReply(323, ":End of /LIST");
         }
 
         private void sendChannelNames(String channelName) {
-            ChatRoom room = chatRooms.get(channelName);
-            if (room != null) {
+            Set<UserChannelInfo> users = channelUsers.get(channelName);
+            if (users != null) {
                 StringBuilder names = new StringBuilder();
-                room.getUsers().forEach(user -> names.append(user).append(" "));
+                users.forEach(info -> {
+                    names.append(info.username).append(" ");
+                });
                 sendNumericReply(353, "= " + channelName + " :" + names.toString());
                 sendNumericReply(366, channelName + " :End of /NAMES list");
             }
         }
 
-        public void cleanup() {
+        private void cleanup() {
+            if (user != null) {
+                user.setOnline(false);
+            }
             new HashSet<>(channels).forEach(this::partChannel);
-
             clients.remove(this);
             try {
                 socket.close();
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+    }
+
+    private void broadcastToChannel(String channelName, String message) {
+        ChatRoom room = chatRooms.get(channelName);
+        if (room != null) {
+            room.sendMessage(message);
         }
     }
 }

@@ -30,7 +30,7 @@ public class IRCClient {
 
     private static final int MAX_RETRIES = 5;
     private static final int RETRY_DELAY_MS = 5000;
-    private static final int SOCKET_TIMEOUT_MS = 30000; // 30 seconds
+    private static final int SOCKET_TIMEOUT_MS = 300000; // 30 seconds
 
     public IRCClient() {
         this.consoleReader = new BufferedReader(new InputStreamReader(System.in));

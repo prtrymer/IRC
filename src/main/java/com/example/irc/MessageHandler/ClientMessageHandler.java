@@ -24,6 +24,11 @@ public class ClientMessageHandler extends MessageHandler {
     private int currentChannelPage = 0;
     private boolean isViewingChannelList = false;
 
+
+    public void setCollectingChannels(boolean collectingChannels) {
+        isCollectingChannels = collectingChannels;
+    }
+
     private record CommandInfo(String syntax, String description, String examples) {}
 
     private record ChannelInfo(String channel, String users, String topic) {
@@ -537,6 +542,5 @@ public class ClientMessageHandler extends MessageHandler {
     public void setMessageCallback(MessageCallback messageCallback) {
         this.messageCallback = messageCallback;
     }
-
 
 }
